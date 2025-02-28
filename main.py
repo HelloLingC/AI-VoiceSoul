@@ -11,6 +11,7 @@ import asr
 import threading
 import llm
 import prompt
+import tts
 
 console = Console()
 
@@ -32,7 +33,7 @@ vad_iterator = VADIterator(model)
 is_speaking = False
 is_transcribing = False
 is_llm_waiting = False
-is_tts_generating = False
+is_tts_synthesizing = False
 speaking_wait_time = 0
 vad_results = []
 vad_lines = []
@@ -48,14 +49,17 @@ def on_llm_response(response: str):
     # console.print(f"[blue]{llm_response_text}[/blue]", end="")
 
 def transcribe_audio_thread(audio_data):
-    global is_transcribing, is_llm_waiting, llm_response_text
+    global is_transcribing, is_llm_waiting, llm_response_text, is_tts_synthesizing
     text = asr.transcribe_audio(audio_data)
     console.print(text)
     is_transcribing = False
     is_llm_waiting = True
     llm_response_text = "thinking..."
-    llm.ask_llm(text, on_llm_response, prompt.get_cute_gl_prompt())
+    llm.ask_llm(text, on_llm_response, prompt.get_assistant_prompt())
     is_llm_waiting = False
+    is_tts_synthesizing = True
+    tts.synthesize(llm_response_text)
+    is_tts_synthesizing = False
 
 def detected_vad(data, audio_chunk=None):
     global is_speaking, speaking_audio_chunk, speaking_wait_time, is_transcribing
@@ -75,7 +79,7 @@ def detected_vad(data, audio_chunk=None):
         vad_lines.append(f"VAD ended at {data['end']}")
         if speaking_audio_chunk:  # If we have collected audio
             audio_data = np.concatenate(speaking_audio_chunk)
-            if not is_transcribing:
+            if not is_transcribing and not is_llm_waiting and not is_tts_synthesizing:
                 is_transcribing = True
                 t = threading.Thread(target=transcribe_audio_thread, args=(audio_data,))
                 t.start()
@@ -124,9 +128,9 @@ def draw_volume_wave_cli(live, rate=16000, chunk=512, channels=1, format=pyaudio
                 time.sleep(0.02)
 
             if speech_prob is not None:
-                detected_vad(speech_prob)
-            # else:
-                # speaking_wait_time -= 1
+                if 'end' in speech_prob:
+                    # Todo: check if end is within 1 second
+                    detected_vad(speech_prob)
 
             if len(vad_lines) > 0:
                 vad_text = " & ".join(vad_lines)
@@ -136,8 +140,11 @@ def draw_volume_wave_cli(live, rate=16000, chunk=512, channels=1, format=pyaudio
             live.update(f"""[{bar}{spaces}
                         Volume: {int(volume)}
                         {vad_text}
-                        {'[bold green]Speaking[/bold green]' if is_speaking else '[bold red]Not speaking[/bold red]'} | {'[bold green]Transcribing[/bold green]' if is_transcribing else '[bold]Not transcribing[/bold]'} | {'[bold green]LLM processing[/bold green]' if is_llm_waiting else '[bold]LLM not processing[/bold]'}
-[blue]{llm_response_text}[/blue]""")
+                        {'[bold green]Speaking[/bold green]' if is_speaking else '[bold red]Not speaking[/bold red]'} | {'[bold green]Transcribing[/bold green]' if is_transcribing else '[bold]Not transcribing[/bold]'} | {'[bold green]LLM processing[/bold green]' if is_llm_waiting else '[bold]LLM not processing[/bold]'} | {'[bold green]synthesizing[/bold green]' if is_tts_synthesizing else '[bold]not synthesizing[/bold]'}
+
+    [blue]{llm_response_text}[/blue]
+
+""")
 
         except OSError as e:
             if e.errno == pyaudio.paInputOverflowed:

@@ -29,12 +29,11 @@ def ask_llm(prompt: str, callback, system_prompt: str) -> str:
             stream=True
         )
         for chunk in response:
-            if chunk.choices[0].delta.content is not None:
+            if chunk.choices[0].delta.content:
                 callback(chunk.choices[0].delta.content)
 
-        response_text = response.choices[0].message.content
-        conversation_history.append({"role": "assistant", "content": response_text})
-        return response_text
+        # response_text = response.choices[0].message.content
+        # conversation_history.append({"role": "assistant", "content": response_text})
+        # return response_text
     except Exception as e:
         print(f"Error generating completion: {e}")
-        return ""
