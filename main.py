@@ -1,0 +1,159 @@
+import pyaudio
+import numpy as np
+import time
+import os
+from rich.console import Console
+from rich.live import Live
+from rich.text import Text
+import torch
+import torchaudio
+import asr
+import threading
+import llm
+import prompt
+
+console = Console()
+
+# Initialize Silero VAD model properly
+model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
+                            model='silero_vad',
+                            force_reload=False,
+                            onnx=True)
+(get_speech_timestamps,
+ save_audio,
+ read_audio,
+ VADIterator,
+ collect_chunks) = utils
+
+"""
+silero vad (Supported values: 256 for 8000 sample rate, 512 for 16000)
+"""
+vad_iterator = VADIterator(model)
+is_speaking = False
+is_transcribing = False
+is_llm_waiting = False
+is_tts_generating = False
+speaking_wait_time = 0
+vad_results = []
+vad_lines = []
+speaking_audio_chunk = []  # store audio during speech
+
+llm_response_text = ""
+
+def on_llm_response(response: str):
+    global llm_response_text
+    if llm_response_text == "thinking...":
+        llm_response_text = ""
+    llm_response_text += response
+    # console.print(f"[blue]{llm_response_text}[/blue]", end="")
+
+def transcribe_audio_thread(audio_data):
+    global is_transcribing, is_llm_waiting, llm_response_text
+    text = asr.transcribe_audio(audio_data)
+    console.print(text)
+    is_transcribing = False
+    is_llm_waiting = True
+    llm_response_text = "thinking..."
+    llm.ask_llm(text, on_llm_response, prompt.get_cute_gl_prompt())
+    is_llm_waiting = False
+
+def detected_vad(data, audio_chunk=None):
+    global is_speaking, speaking_audio_chunk, speaking_wait_time, is_transcribing
+    vad_results.append(data)
+    if len(vad_lines) > 4:
+        vad_lines.pop(0)
+
+    if 'start' in data:
+        is_speaking = True
+        speaking_wait_time = 25
+        speaking_audio_chunk = []  # Reset audio chunk at start of speech
+        vad_lines.append(f"VAD detected at {data['start']}")
+    else:
+        # if speaking_wait_time > 0:
+        #     return
+        is_speaking = False
+        vad_lines.append(f"VAD ended at {data['end']}")
+        if speaking_audio_chunk:  # If we have collected audio
+            audio_data = np.concatenate(speaking_audio_chunk)
+            if not is_transcribing:
+                is_transcribing = True
+                t = threading.Thread(target=transcribe_audio_thread, args=(audio_data,))
+                t.start()
+
+        speaking_audio_chunk = []
+        vad_iterator.reset_states()
+
+def draw_volume_wave_cli(live, rate=16000, chunk=512, channels=1, format=pyaudio.paInt16, duration=100):
+    """Draws a simple audio volume wave in the CLI."""
+    global speaking_wait_time
+
+    p = pyaudio.PyAudio()
+
+    stream = p.open(format=format,
+                    channels=channels,
+                    rate=rate,
+                    input=True,
+                    frames_per_buffer=chunk)
+
+    print("Recording and displaying wave...")
+
+    start_time = time.time()
+    while True:
+        try:
+            data = stream.read(chunk)
+            # Create a writable copy of the numpy array
+            data_np = np.frombuffer(data, dtype=np.int16).copy()
+            volume = np.abs(data_np).mean()  # Simple volume calculation
+
+            # Convert audio data for VAD - normalize to float between -1 and 1
+            tensor = torch.from_numpy(data_np).float() / 32768.0
+            speech_prob = vad_iterator(tensor, rate)
+
+            # Normalize and scale for CLI display
+            max_volume = 2**15  # Max value for paInt16
+            normalized_volume = volume / max_volume
+            bar_length = int(normalized_volume * os.get_terminal_size().columns * 1.5)
+
+            bar = "#" * bar_length
+            spaces = " " * (os.get_terminal_size().columns - bar_length - 2)
+
+            # Store audio data if speaking
+            if is_speaking:
+                speaking_audio_chunk.append(data_np)
+            else:
+                time.sleep(0.02)
+
+            if speech_prob is not None:
+                detected_vad(speech_prob)
+            # else:
+                # speaking_wait_time -= 1
+
+            if len(vad_lines) > 0:
+                vad_text = " & ".join(vad_lines)
+            else:
+                vad_text = "No speech detected"
+
+            live.update(f"""[{bar}{spaces}
+                        Volume: {int(volume)}
+                        {vad_text}
+                        {'[bold green]Speaking[/bold green]' if is_speaking else '[bold red]Not speaking[/bold red]'} | {'[bold green]Transcribing[/bold green]' if is_transcribing else '[bold]Not transcribing[/bold]'} | {'[bold green]LLM processing[/bold green]' if is_llm_waiting else '[bold]LLM not processing[/bold]'}
+[blue]{llm_response_text}[/blue]""")
+
+        except OSError as e:
+            if e.errno == pyaudio.paInputOverflowed:
+                console.print("Input overflowed. Skipping chunk.")
+                continue;
+            else:
+                console.print(f"An OS error occurred: {e}")
+                break;
+
+    console.print("\nFinished.")
+
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+
+if __name__ == "__main__":
+    console.clear()
+    with Live(console=console, refresh_per_second=25) as live:
+        draw_volume_wave_cli(live)
