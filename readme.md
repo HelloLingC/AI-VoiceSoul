@@ -1,6 +1,6 @@
 
 
 
-Speech to text with VAD
-LLM handling
-Text to speech
+VAD -> ASR -> LLM -> TTS
+
+LLM - TTS 双流式

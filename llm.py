@@ -28,12 +28,16 @@ def ask_llm(prompt: str, callback, system_prompt: str) -> str:
             messages=messages,
             stream=True
         )
+        full_response_text = ""
         for chunk in response:
             if chunk.choices[0].delta.content:
-                callback(chunk.choices[0].delta.content)
+                full_response_text += chunk.choices[0].delta.content
+                if callback:
+                    callback(chunk.choices[0].delta.content)
 
+        # error the following
         # response_text = response.choices[0].message.content
-        # conversation_history.append({"role": "assistant", "content": response_text})
-        # return response_text
+        conversation_history.append({"role": "assistant", "content": full_response_text})
+        return full_response_text
     except Exception as e:
         print(f"Error generating completion: {e}")
